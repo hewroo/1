@@ -1,0 +1,42 @@
+      - name: Create RDP User
+        shell: powershell
+        run: |
+          # Disable Windows password complexity requirement
+          $cfg = "$env:TEMP\secpol.cfg"
+
+          secedit /export /cfg $cfg /quiet
+
+          (Get-Content $cfg) -replace 'PasswordComplexity\s*=\s*1', 'PasswordComplexity = 0' |
+            Set-Content $cfg
+
+          secedit /configure /db "$env:TEMP\secedit.sdb" /cfg $cfg /areas SECURITYPOLICY /quiet
+
+          Start-Sleep -Seconds 2
+
+          # RDP credentials
+          $username = "RDP"
+          $password = "123123asd"
+
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          # Create RDP user
+          New-LocalUser `
+            -Name $username `
+            -Password $securePass `
+            -AccountNeverExpires
+
+          # Add administrator privileges
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member $username
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member $username
+
+          "RDP_USERNAME=$username" >> $env:GITHUB_ENV
+          "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+
+          Write-Host "RDP user created successfully."
+          Write-Host "Username: $username"
+          Write-Host "Password: $password"
