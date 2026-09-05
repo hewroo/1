@@ -1,35 +1,76 @@
+name: RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+
+      - name: Configure Core RDP Settings
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+
+
       - name: Create RDP User
         shell: powershell
         run: |
-          # Disable Windows password complexity requirement
+          $username = "RDP"
+          $password = "miniclip123"
+
+          # Disable password complexity
           $cfg = "$env:TEMP\secpol.cfg"
 
           secedit /export /cfg $cfg /quiet
 
-          (Get-Content $cfg) -replace 'PasswordComplexity\s*=\s*1', 'PasswordComplexity = 0' |
-            Set-Content $cfg
+          $content = Get-Content $cfg
+          $content = $content -replace 'PasswordComplexity\s*=\s*1', 'PasswordComplexity = 0'
+          $content | Set-Content $cfg
 
-          secedit /configure /db "$env:TEMP\secedit.sdb" /cfg $cfg /areas SECURITYPOLICY /quiet
+          secedit /configure `
+            /db "$env:TEMP\secedit.sdb" `
+            /cfg $cfg `
+            /areas SECURITYPOLICY `
+            /quiet
 
           Start-Sleep -Seconds 2
 
-          # RDP credentials
-          $username = "RDP"
-          $password = "123123asd"
+          # Create password
+          $securePass = ConvertTo-SecureString `
+            $password `
+            -AsPlainText `
+            -Force
 
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-
-          # Create RDP user
+          # Create user
           New-LocalUser `
             -Name $username `
             -Password $securePass `
             -AccountNeverExpires
 
-          # Add administrator privileges
+          # Add Administrator
           Add-LocalGroupMember `
             -Group "Administrators" `
             -Member $username
 
+          # Add Remote Desktop Users
           Add-LocalGroupMember `
             -Group "Remote Desktop Users" `
             -Member $username
@@ -37,6 +78,96 @@
           "RDP_USERNAME=$username" >> $env:GITHUB_ENV
           "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
-          Write-Host "RDP user created successfully."
+          Write-Host "RDP USER CREATED"
           Write-Host "Username: $username"
           Write-Host "Password: $password"
+
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+
+          Invoke-WebRequest `
+            -Uri $tsUrl `
+            -OutFile $installerPath
+
+          Start-Process msiexec.exe `
+            -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" `
+            -Wait
+
+          Remove-Item $installerPath -Force
+
+
+      - name: Establish Tailscale Connection
+        shell: powershell
+        run: |
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          & $tailscale up `
+            --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" `
+            --hostname="gh-runner-$env:GITHUB_RUN_ID"
+
+          $tsIP = $null
+          $retries = 0
+
+          while (-not $tsIP -and $retries -lt 10) {
+
+            $tsIP = (& $tailscale ip -4).Trim()
+
+            if (-not $tsIP) {
+              Start-Sleep -Seconds 5
+            }
+
+            $retries++
+          }
+
+          if (-not $tsIP) {
+            Write-Error "Tailscale IP was not assigned."
+            exit 1
+          }
+
+          "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+          Write-Host "Tailscale IP: $tsIP"
+
+
+      - name: Verify RDP Accessibility
+        shell: powershell
+        run: |
+          Write-Host "Testing RDP: $env:TAILSCALE_IP`:3389"
+
+          $result = Test-NetConnection `
+            -ComputerName $env:TAILSCALE_IP `
+            -Port 3389
+
+          if (-not $result.TcpTestSucceeded) {
+            Write-Error "RDP port 3389 is not accessible."
+            exit 1
+          }
+
+          Write-Host "RDP connectivity successful."
+
+
+      - name: Show RDP Information
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "              RDP ACCESS"
+          Write-Host "=========================================="
+          Write-Host "Address : $env:TAILSCALE_IP"
+          Write-Host "Username: $env:RDP_USERNAME"
+          Write-Host "Password: $env:RDP_PASSWORD"
+          Write-Host "=========================================="
+          Write-Host ""
+
+
+      - name: Maintain Connection
+        shell: powershell
+        run: |
+          while ($true) {
+            Write-Host "[$(Get-Date)] RDP Active - $env:TAILSCALE_IP"
+            Start-Sleep -Seconds 300
+          }
